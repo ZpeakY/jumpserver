@@ -1,4 +1,5 @@
 # ~*~ coding: utf-8 ~*~
+import time
 
 from django.urls import reverse_lazy, reverse
 from django.utils.translation import ugettext as _
@@ -6,8 +7,12 @@ from django.views.generic.base import TemplateView
 from django.views.generic.edit import FormView
 from django.contrib.auth import logout as auth_logout
 from django.conf import settings
+from django.shortcuts import redirect
 
+from authentication.mixins import AuthMixin
+from users.models import User
 from common.utils import get_logger
+from common.utils import get_object_or_none
 from common.permissions import IsValidUser
 from ... import forms
 from .password import UserVerifyPasswordView
@@ -46,12 +51,35 @@ class UserOtpEnableInstallAppView(TemplateView):
         return super().get_context_data(**kwargs)
 
 
-class UserOtpEnableBindView(TemplateView, FormView):
+class UserOtpEnableBindView(AuthMixin, TemplateView, FormView):
     template_name = 'users/user_otp_enable_bind.html'
     form_class = forms.UserCheckOtpCodeForm
     success_url = reverse_lazy('authentication:user-otp-settings-success')
 
     def form_valid(self, form):
+        request = self.request
+        request_user = request.user
+        session_user = None
+
+        if not self.request.session.is_empty():
+            user_id = self.request.session.get('user_id', '')
+            session_user = get_object_or_none(User, pk=user_id)
+
+        auth_password = request.session.get('auth_password')
+        if request_user.is_authenticated:
+            if request_user.mfa_enabled and request_user.otp_secret_key:
+                logger.warn(f'OPT_BIND-> authenticated '
+                            f'request_user.mfa_enabled={request_user.mfa_enabled}, '
+                            f'request_user.otp_secret_key={request_user.otp_secret_key}')
+                return redirect(reverse('authentication:user-otp-update'))
+        else:
+            if not all((auth_password, session_user, session_user.mfa_enabled, not session_user.otp_secret_key)):
+                logger.warn(f'OPT_BIND-> un_authenticated '
+                            f'auth_password={auth_password}, '
+                            f'serssion_user.mfa_enabled={session_user.mfa_enabled}, '
+                            f'serssion_user.otp_secret_key={session_user.otp_secret_key}')
+                return redirect(reverse('authentication:login'))
+
         otp_code = form.cleaned_data.get('otp_code')
         otp_secret_key = self.request.session.get('otp_secret_key', '')
 
@@ -116,6 +144,8 @@ class UserOtpUpdateView(FormView):
 
         valid = user.check_mfa(otp_code)
         if valid:
+            user.otp_secret_key = ''
+            user.save()
             return super().form_valid(form)
         else:
             error = _('MFA code invalid, or ntp sync server time')
